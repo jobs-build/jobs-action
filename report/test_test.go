@@ -18,6 +18,14 @@ func TestLabelAndCheckName(t *testing.T) {
 	if root.Label() != "." || root.CheckName() != "jobs / . (linux/arm64)" {
 		t.Fatalf("root: %q, %q", root.Label(), root.CheckName())
 	}
+	set := Test{Path: "/services/api", Set: "fast", Platform: "linux/amd64"}
+	if set.Label() != "services/api [fast]" || set.CheckName() != "jobs / services/api [fast] (linux/amd64)" {
+		t.Fatalf("set: %q, %q", set.Label(), set.CheckName())
+	}
+	rootSet := Test{Path: "/", Set: "cli-0", Platform: "linux/amd64"}
+	if rootSet.Label() != ". [cli-0]" || rootSet.CheckName() != "jobs / . [cli-0] (linux/amd64)" {
+		t.Fatalf("root set: %q, %q", rootSet.Label(), rootSet.CheckName())
+	}
 }
 
 func TestTitles(t *testing.T) {

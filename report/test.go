@@ -18,19 +18,25 @@ const TextBudget = 60000
 // TailLines is how many of a test's last output lines are kept for its report.
 const TailLines = 200
 
-// Test is one TESTS.jobs on one platform.
+// Test is one TESTS.jobs on one platform, with one set of params when its
+// directory lists sets.
 type Test struct {
 	Path     string // "/"-rooted directory, as jobs.Local.TestDirs returns it
+	Set      string // name of the param set; "" when the test has no sets
 	Platform string
 }
 
 // Label is the test's directory as people write it: no leading slash, and "."
-// for the project root.
+// for the project root. A param set follows in brackets: "services/api [fast]".
 func (t Test) Label() string {
-	if l := strings.TrimPrefix(t.Path, "/"); l != "" {
-		return l
+	l := strings.TrimPrefix(t.Path, "/")
+	if l == "" {
+		l = "."
 	}
-	return "."
+	if t.Set != "" {
+		l += " [" + t.Set + "]"
+	}
+	return l
 }
 
 // CheckName is the name of the test's check run.
