@@ -1,0 +1,15 @@
+.DS_Store
+.direnv
+*.test
+*~
+
+# built binaries
+/jobs-action
+/dist/
+
+# nix build output
+result
+result-*
+
+# superpowers scratch
+.superpowers/

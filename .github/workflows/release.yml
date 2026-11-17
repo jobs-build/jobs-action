@@ -1,0 +1,81 @@
+name: Release
+
+# Pushing a vX.Y.Z tag builds the binaries, publishes the GitHub release with
+# them, and only then moves the floating major tag. action.yml downloads its
+# binary from the release it names, so a floating tag must never point at a
+# commit whose release does not exist yet.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: The tag is the version action.yml runs
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          want=$(scripts/action-version)
+          if [ "$TAG" != "$want" ]; then
+            echo "::error::tag $TAG does not match action.yml (JOBS_ACTION_VERSION: $want)"
+            exit 1
+          fi
+
+      - name: go test
+        run: go test ./...
+
+      - name: Build
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH=$arch go build -trimpath \
+              -ldflags "-s -w -X main.version=$TAG" \
+              -o "dist/jobs-action-linux-$arch" ./cmd/jobs-action
+          done
+          (cd dist && sha256sum jobs-action-linux-* > checksums.txt)
+          cat dist/checksums.txt
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        # Skipped when the release already exists, so that the job can be
+        # re-run after a failure in the step below.
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG already exists"
+          else
+            gh release create "$TAG" --verify-tag --generate-notes dist/*
+          fi
+
+      - name: Move the floating major tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        # Through the API, not git push: GitHub refuses a workflow token's push
+        # of a ref whose history changes workflow files.
+        run: |
+          major="${TAG%%.*}"
+          sha=$(git rev-parse "$TAG^{commit}")
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$major" >/dev/null 2>&1; then
+            gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$major" -f sha="$sha" -F force=true
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$major" -f sha="$sha"
+          fi

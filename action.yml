@@ -1,0 +1,98 @@
+name: jobs tests
+description: Run every TESTS.jobs in the repository on a jobs-iroh server and report each test as a check
+author: jobs-build
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  server:
+    description: >-
+      jobs-iroh server endpoint ID. Knowing it grants access to the server, so
+      pass it from a secret.
+    required: true
+  server-addr:
+    description: Direct host:port addresses of the server, comma-separated.
+    required: false
+    default: ""
+  platform:
+    description: Platform every test runs on.
+    required: false
+    default: linux/amd64
+  root:
+    description: >-
+      Project root, relative to the workspace: the tree that is ingested and
+      searched for TESTS.jobs.
+    required: false
+    default: "."
+  token:
+    description: >-
+      Token for the Checks API: the workflow's token (the job needs
+      "checks: write") or a GitHub App installation token.
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  passed:
+    description: Number of tests that passed, including those already passed.
+    value: ${{ steps.run.outputs.passed }}
+  cached:
+    description: Number of passed tests the server had already passed and did not run.
+    value: ${{ steps.run.outputs.cached }}
+  failed:
+    description: Number of tests that failed.
+    value: ${{ steps.run.outputs.failed }}
+  cancelled:
+    description: Number of tests that were cancelled.
+    value: ${{ steps.run.outputs.cancelled }}
+
+runs:
+  using: composite
+  steps:
+    - name: Download jobs-action
+      id: download
+      shell: bash
+      env:
+        # The release this action.yml runs. scripts/action-version reads this
+        # line; the release workflow refuses a tag that does not match it.
+        JOBS_ACTION_VERSION: v0.1.0
+      run: |
+        set -euo pipefail
+        case "${RUNNER_OS}-${RUNNER_ARCH}" in
+          Linux-X64)   asset=jobs-action-linux-amd64 ;;
+          Linux-ARM64) asset=jobs-action-linux-arm64 ;;
+          *)
+            echo "::error::jobs-action supports Linux x64 and arm64 runners only (this runner is ${RUNNER_OS} ${RUNNER_ARCH})"
+            exit 1
+            ;;
+        esac
+        dir="${RUNNER_TEMP}/jobs-action/bin"
+        mkdir -p "$dir"
+        base="https://github.com/jobs-build/jobs-action/releases/download/${JOBS_ACTION_VERSION}"
+        curl -fsSL --retry 5 --retry-all-errors -o "$dir/$asset" "$base/$asset"
+        curl -fsSL --retry 5 --retry-all-errors -o "$dir/checksums.txt" "$base/checksums.txt"
+        # Catches a corrupt or truncated download. The checksums come from the
+        # same release as the binary, so this is not a trust anchor.
+        (cd "$dir" && grep " ${asset}\$" checksums.txt | sha256sum -c -)
+        chmod +x "$dir/$asset"
+        echo "bin=$dir/$asset" >> "$GITHUB_OUTPUT"
+
+    - name: Run TESTS.jobs
+      id: run
+      shell: bash
+      # Inputs reach the script through the environment only, never by
+      # interpolation into it.
+      env:
+        JOBS_ACTION_BIN: ${{ steps.download.outputs.bin }}
+        JOBS_SERVER: ${{ inputs.server }}
+        JOBS_SERVER_ADDR: ${{ inputs.server-addr }}
+        JOBS_ACTION_PLATFORM: ${{ inputs.platform }}
+        JOBS_ACTION_ROOT: ${{ inputs.root }}
+        GITHUB_TOKEN: ${{ inputs.token }}
+      # exec: the binary, not this shell, must receive the cancellation
+      # signal. A shell waiting on a child does not pass it on.
+      run: |
+        exec "$JOBS_ACTION_BIN" \
+          --platform "$JOBS_ACTION_PLATFORM" \
+          --root "$JOBS_ACTION_ROOT" \
+          --data-dir "${RUNNER_TEMP}/jobs-action/store"
