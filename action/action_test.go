@@ -723,8 +723,6 @@ func TestMainListDiscoversIngestedTree(t *testing.T) {
 	write("lib/TESTS.jobs", "def test(): pass\n")
 	write("ignored/TESTS.jobs", "def test(): pass\n")
 	write(".amberignore", "/ignored\n")
-	write("services/api/"+SetsFile, "sets:\n  unit: {}\n  e2e: {shard: 0}\n")
-	write("ignored/"+SetsFile, "not a set list\n") // its test is not in the run
 	if err := os.MkdirAll(filepath.Join(root, "other", "TESTS.jobs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -740,7 +738,7 @@ func TestMainListDiscoversIngestedTree(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit = %d\nstderr: %s", code, errw.String())
 	}
-	if got, want := out.String(), ".\tlinux/arm64\nlib\tlinux/arm64\nservices/api [unit]\tlinux/arm64\nservices/api [e2e]\tlinux/arm64\n"; got != want {
+	if got, want := out.String(), ".\tlinux/arm64\nlib\tlinux/arm64\nservices/api\tlinux/arm64\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
 	}
 }
@@ -767,101 +765,5 @@ func TestRunReportWaitBounded(t *testing.T) {
 	}
 	if !strings.Contains(readFile(t, h.summary), "2 passed") {
 		t.Fatal("the summary must be written before waiting on GitHub")
-	}
-}
-
-// A TESTS.params.yaml beside a TESTS.jobs makes that test run once per set,
-// with the set's params, and not without params. A test without the file is
-// run as before.
-func TestRunParamSets(t *testing.T) {
-	h := newHarness(t, []string{"/", "/svc"}, map[string]script{})
-	writeSets(t, filepath.Join(h.cfg.Root, "svc"), "sets:\n  slow: {group: e2e, shard: 0}\n  fast: {}\n")
-	if code := h.run(context.Background()); code != 0 {
-		t.Fatalf("exit = %d, want 0\nstderr: %s", code, h.err.String())
-	}
-
-	// The specs are assimilate's whole-tree test with the set's params as
-	// args: what `assimilate test` submits for an image with those args.
-	got := map[string]spec.BuildSpec{}
-	for _, s := range h.be.submitted {
-		name := s.Name
-		s.Name = ""
-		got[name] = s
-	}
-	slow := spec.WholeTreeTest("/svc", "linux/amd64")
-	slow.Args = map[string]string{"group": "e2e", "shard": "0"}
-	fast := spec.WholeTreeTest("/svc", "linux/amd64")
-	fast.Args = map[string]string{}
-	want := map[string]spec.BuildSpec{
-		".":          spec.WholeTreeTest("/", "linux/amd64"),
-		"svc [slow]": slow,
-		"svc [fast]": fast,
-	}
-	if len(got) != len(want) {
-		t.Fatalf("submitted %d specs, want %d: %+v", len(got), len(want), got)
-	}
-	for name, w := range want {
-		g, ok := got[name]
-		if !ok {
-			t.Fatalf("no spec named %q; have %+v", name, got)
-		}
-		if g.Key() != w.Key() || g.Test != w.Test || g.WholeTree != w.WholeTree {
-			t.Errorf("spec %q = %+v, want %+v", name, g, w)
-		}
-	}
-
-	updates := h.gh.byName()
-	for _, name := range []string{"jobs / . (linux/amd64)", "jobs / svc [slow] (linux/amd64)", "jobs / svc [fast] (linux/amd64)"} {
-		if u := one(t, updates, name); u.Conclusion != "success" {
-			t.Errorf("%s = %+v", name, u)
-		}
-	}
-	if len(updates) != 3 {
-		t.Fatalf("checks = %v", keys(updates))
-	}
-
-	// The rows keep the file's order within a directory.
-	summary := readFile(t, h.summary)
-	slowRow, fastRow := strings.Index(summary, "| svc [slow] | linux/amd64 |"), strings.Index(summary, "| svc [fast] | linux/amd64 |")
-	if slowRow < 0 || fastRow < 0 || slowRow > fastRow {
-		t.Errorf("summary:\n%s", summary)
-	}
-	if got := readFile(t, h.outputFile); got != "passed=3\ncached=0\nfailed=0\ncancelled=0\n" {
-		t.Errorf("outputs = %q", got)
-	}
-	if !strings.Contains(h.out.String(), "[svc [slow]] ▸ done") {
-		t.Errorf("stdout:\n%s", h.out.String())
-	}
-}
-
-func TestRunListParamSets(t *testing.T) {
-	h := newHarness(t, []string{"/", "/a"}, nil)
-	writeSets(t, h.cfg.Root, "sets:\n  two: {n: 2}\n  one: {n: 1}\n")
-	h.cfg.List = true
-	h.cfg.Server = ""
-	if code := h.run(context.Background()); code != 0 {
-		t.Fatalf("exit = %d, want 0\nstderr: %s", code, h.err.String())
-	}
-	if got, want := h.out.String(), ". [two]\tlinux/amd64\n. [one]\tlinux/amd64\na\tlinux/amd64\n"; got != want {
-		t.Fatalf("stdout = %q, want %q", got, want)
-	}
-}
-
-// A set list that cannot be read stops the run before anything is submitted:
-// running the test without params in its place would be another test.
-func TestRunBadParamSets(t *testing.T) {
-	h := newHarness(t, []string{"/a", "/svc"}, nil)
-	writeSets(t, filepath.Join(h.cfg.Root, "svc"), "sets:\n  \"not a name\": {}\n")
-	if code := h.run(context.Background()); code != 1 {
-		t.Fatalf("exit = %d, want 1", code)
-	}
-	if !strings.Contains(h.err.String(), "svc/TESTS.params.yaml") || !strings.Contains(h.err.String(), `"not a name"`) {
-		t.Fatalf("stderr = %q", h.err.String())
-	}
-	if h.dials != 0 {
-		t.Fatal("dialled with an unreadable set list")
-	}
-	if c, u := h.gh.calls(); c+u != 0 {
-		t.Fatalf("API calls: %d creates, %d updates", c, u)
 	}
 }

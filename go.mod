@@ -6,7 +6,6 @@ require (
 	github.com/jobs-build/assimilate v0.10.0
 	github.com/jobs-build/jobs-iroh v0.36.0
 	github.com/tmc/go-iroh v0.2.1
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (

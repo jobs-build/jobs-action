@@ -8,8 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -127,34 +125,15 @@ func Run(ctx context.Context, cfg Config, d Deps) int {
 	if err != nil {
 		return fatal("find tests under %s: %v", cfg.Root, err)
 	}
-	var tests []report.Test
-	var specs []spec.BuildSpec
-	add := func(dir, set string, params map[string]string) {
-		t := report.Test{Path: dir, Set: set, Platform: cfg.Platform}
+	tests := make([]report.Test, len(dirs))
+	specs := make([]spec.BuildSpec, len(dirs))
+	for i, dir := range dirs {
+		tests[i] = report.Test{Path: dir, Platform: cfg.Platform}
 		// assimilate's project-tree test: the whole root tree as context, the
-		// directory as Dir, and the set's params or none. That shape is what
-		// makes a pass recorded here a memo hit for a developer, and the
-		// other way round.
-		s := spec.WholeTreeTest(dir, cfg.Platform)
-		if len(params) > 0 { // a set without params is the test without params
-			s.Args = params
-		}
-		s.Name = t.Label() // display only; not part of the key
-		tests, specs = append(tests, t), append(specs, s)
-	}
-	for _, dir := range dirs {
-		sets, err := ReadSets(filepath.Join(cfg.Root, filepath.FromSlash(dir)))
-		if err != nil {
-			// Not run without params in its place: that is another test.
-			return fatal("%s: %v", path.Join(strings.TrimPrefix(dir, "/"), SetsFile), err)
-		}
-		if sets == nil {
-			add(dir, "", nil)
-			continue
-		}
-		for _, set := range sets {
-			add(dir, set.Name, set.Params)
-		}
+		// directory as Dir, no params. That shape is what makes a pass
+		// recorded here a memo hit for a developer, and the other way round.
+		specs[i] = spec.WholeTreeTest(dir, cfg.Platform)
+		specs[i].Name = tests[i].Label() // display only; not part of the key
 	}
 
 	if cfg.List {
