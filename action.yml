@@ -55,7 +55,7 @@ runs:
       env:
         # The release this action.yml runs. scripts/action-version reads this
         # line; the release workflow refuses a tag that does not match it.
-        JOBS_ACTION_VERSION: v0.1.0
+        JOBS_ACTION_VERSION: v0.1.1
       run: |
         set -euo pipefail
         case "${RUNNER_OS}-${RUNNER_ARCH}" in

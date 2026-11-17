@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jobs-build/assimilate/spec"
 )
 
 func TestPlainLines(t *testing.T) {
 	var buf bytes.Buffer
-	p := NewPlain(&buf, twoTests)
+	p := NewPlain(&buf, twoTests, newClock().now)
 	p.Handle(spec.Event{Build: 0, Kind: spec.KindState, State: spec.StateBuilding})
 	p.Handle(spec.Event{Build: 0, Kind: spec.KindInfo, Info: "1/3 built"})
 	p.Handle(spec.Event{Build: 1, Kind: spec.KindLog, Node: "testrun_ab", Line: "ok"})
@@ -36,7 +37,7 @@ func TestPlainLines(t *testing.T) {
 // untrusted, so no line the printer writes may start with one.
 func TestPlainLinesStartWithBracket(t *testing.T) {
 	var buf bytes.Buffer
-	p := NewPlain(&buf, twoTests)
+	p := NewPlain(&buf, twoTests, newClock().now)
 	for _, ev := range []spec.Event{
 		{Build: 0, Kind: spec.KindLog, Line: "::add-mask::x"},
 		{Build: 0, Kind: spec.KindLog, Node: "n", Line: "::error::forged"},
@@ -49,8 +50,8 @@ func TestPlainLinesStartWithBracket(t *testing.T) {
 		p.Handle(ev)
 	}
 	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
-	if len(lines) != 7 {
-		t.Fatalf("want 7 lines, one per event, got %d:\n%s", len(lines), buf.String())
+	if len(lines) != 9 { // one per event, and one more for each of the two line feeds
+		t.Fatalf("want 9 lines, got %d:\n%s", len(lines), buf.String())
 	}
 	for _, line := range lines {
 		if !strings.HasPrefix(line, "[") {
@@ -64,7 +65,7 @@ func TestPlainLinesStartWithBracket(t *testing.T) {
 
 func TestPlainInfoDeduped(t *testing.T) {
 	var buf bytes.Buffer
-	p := NewPlain(&buf, twoTests)
+	p := NewPlain(&buf, twoTests, newClock().now)
 	p.Handle(spec.Event{Build: 0, Kind: spec.KindInfo, Info: "pushing 1/2"})
 	p.Handle(spec.Event{Build: 0, Kind: spec.KindInfo, Info: "pushing 1/2"})
 	p.Handle(spec.Event{Build: 1, Kind: spec.KindInfo, Info: "pushing 1/2"})
@@ -77,7 +78,7 @@ func TestPlainInfoDeduped(t *testing.T) {
 // The runner also honours the legacy "##[command]" form anywhere in a line.
 func TestPlainBreaksLegacyCommands(t *testing.T) {
 	var buf bytes.Buffer
-	p := NewPlain(&buf, twoTests)
+	p := NewPlain(&buf, twoTests, newClock().now)
 	p.Handle(spec.Event{Build: 0, Kind: spec.KindLog, Line: "x ##[error]forged ##[add-mask]y"})
 	p.Handle(spec.Event{Build: 0, Kind: spec.KindState, State: spec.StateFailed, Info: "##[stop-commands]z"})
 	if strings.Contains(buf.String(), "##[") {
@@ -85,5 +86,83 @@ func TestPlainBreaksLegacyCommands(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "error]forged") {
 		t.Fatalf("the text itself was lost:\n%s", buf.String())
+	}
+}
+
+// A failure recap is several lines of test output in one event. Each is
+// printed as a line of its own, under the test's prefix.
+func TestPlainKeepsLineStructure(t *testing.T) {
+	var buf bytes.Buffer
+	p := NewPlain(&buf, twoTests, newClock().now)
+	p.Handle(spec.Event{Build: 1, Kind: spec.KindLog, Line: "--- testrun:21 failed: testing: exec\r\n+ echo x\n\nexpected 2, got 3\n+ exit 1\n\n"})
+	p.Handle(spec.Event{Build: 1, Kind: spec.KindLog, Node: "testrun:21", Line: "a\nb"})
+	p.Handle(spec.Event{Build: 1, Kind: spec.KindLog, Line: ""})
+	want := strings.Join([]string{
+		"[b] --- testrun:21 failed: testing: exec",
+		"[b] + echo x",
+		"[b] ",
+		"[b] expected 2, got 3",
+		"[b] + exit 1",
+		"[b] testrun:21 │ a",
+		"[b] testrun:21 │ b",
+		"[b] ",
+		"",
+	}, "\n")
+	if got := buf.String(); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// Pushing a tree reports every object. The log shows where the push stands
+// now and then, and where it ended.
+func TestPlainPushProgressIsThinned(t *testing.T) {
+	var buf bytes.Buffer
+	c := newClock()
+	p := NewPlain(&buf, twoTests, c.now)
+	push := func(i int, info string) {
+		p.Handle(spec.Event{Build: i, Kind: spec.KindInfo, Info: info})
+	}
+	p.Handle(spec.Event{Build: 0, Kind: spec.KindState, State: spec.StatePushing})
+	p.Handle(spec.Event{Build: 0, Kind: spec.KindInfo, Info: "ingesting"})
+	push(0, "push 0/1 objects")
+	push(0, "push 1/1 objects")
+	push(1, "push 0/4 objects")
+	c.advance(PushEvery - time.Second)
+	push(0, "push 1/2 objects")
+	c.advance(time.Second)
+	push(0, "push 2/9 objects") // PushEvery after the first: printed
+	push(0, "push 3/9 objects")
+	c.advance(PushEvery)
+	push(0, "push 8/9 objects") // printed
+	push(0, "push 9/9 objects")
+	p.Handle(spec.Event{Build: 0, Kind: spec.KindState, State: spec.StateBuilding}) // prints where the push ended
+	p.Handle(spec.Event{Build: 1, Kind: spec.KindState, State: spec.StateFailed, Info: "push failed"})
+	want := strings.Join([]string{
+		"[a] ▸ pushing",
+		"[a] ingesting",
+		"[a] push 2/9 objects",
+		"[a] push 8/9 objects",
+		"[a] push 9/9 objects",
+		"[a] ▸ building",
+		"[b] push 0/4 objects",
+		"[b] ▸ failed (push failed)",
+		"",
+	}, "\n")
+	if got := buf.String(); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// The line printed last is not printed again when the push ends.
+func TestPlainPushEndNotRepeated(t *testing.T) {
+	var buf bytes.Buffer
+	c := newClock()
+	p := NewPlain(&buf, twoTests, c.now)
+	p.Handle(spec.Event{Build: 0, Kind: spec.KindInfo, Info: "push 0/1 objects"})
+	c.advance(PushEvery)
+	p.Handle(spec.Event{Build: 0, Kind: spec.KindInfo, Info: "push 1/1 objects"})
+	p.Handle(spec.Event{Build: 0, Kind: spec.KindState, State: spec.StateBuilding})
+	if got, want := buf.String(), "[a] push 1/1 objects\n[a] ▸ building\n"; got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
 	}
 }

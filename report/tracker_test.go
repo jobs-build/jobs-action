@@ -74,6 +74,74 @@ func TestTrackerCachedShapes(t *testing.T) {
 	}
 }
 
+// The server flags a node cached only when the node is new and its pass is
+// already recorded. A finished request keeps its nodes on the server, so a
+// later run of the same test joins the finished testrun node, unflagged. That
+// node is older than the request's own testvalue node, which is how a test
+// the server did not run for this request is told from one it did.
+func TestTrackerJoinedRunIsCached(t *testing.T) {
+	c := newClock()
+	tr := NewTracker(twoTests, c.now)
+	tr.Handle(state(0, spec.StateBuilding, ""))
+	tr.Handle(snapshot(0, "r", api.NodeSnap{Node: "pin_00", Gen: 201, Phase: "running"}, api.NodeSnap{Node: "testvalue_00", Gen: 200, Phase: "waiting"}))
+	c.advance(2 * time.Second)
+	tr.Handle(snapshot(0, "r",
+		api.NodeSnap{Node: "pin_00", Gen: 201, Phase: "done"},
+		api.NodeSnap{Node: "testrun_00", Gen: 100, Phase: "done"},
+		api.NodeSnap{Node: "testvalue_00", Gen: 200, Phase: "done"}))
+	tr.Handle(state(0, spec.StateDone, ""))
+	if o := tr.Outcome(0); !o.Cached || o.Title() != "already passed (cached)" {
+		t.Fatalf("outcome = %+v, title %q", o, o.Title())
+	}
+}
+
+func TestTrackerOwnRunIsNotCached(t *testing.T) {
+	tr := NewTracker(twoTests, newClock().now)
+	tr.Handle(state(0, spec.StateBuilding, ""))
+	// Snapshots are coalesced: a quick test may only ever be seen done.
+	tr.Handle(snapshot(0, "r",
+		api.NodeSnap{Node: "testrun_00", Gen: 300, Phase: "done"},
+		api.NodeSnap{Node: "testvalue_00", Gen: 200, Phase: "done"}))
+	tr.Handle(state(0, spec.StateDone, ""))
+	if tr.Outcome(0).Cached {
+		t.Fatal("a testrun node created for this request is not a cached test")
+	}
+}
+
+// Another request's test, still running when this one joined it, did run
+// while this request waited for it.
+func TestTrackerJoinedRunSeenRunningIsNotCached(t *testing.T) {
+	tr := NewTracker(twoTests, newClock().now)
+	tr.Handle(state(0, spec.StateBuilding, ""))
+	tr.Handle(snapshot(0, "r",
+		api.NodeSnap{Node: "testrun_00", Gen: 100, Phase: "running"},
+		api.NodeSnap{Node: "testvalue_00", Gen: 200, Phase: "waiting"}))
+	tr.Handle(snapshot(0, "r",
+		api.NodeSnap{Node: "testrun_00", Gen: 100, Phase: "done"},
+		api.NodeSnap{Node: "testvalue_00", Gen: 200, Phase: "done"}))
+	tr.Handle(state(0, spec.StateDone, ""))
+	if tr.Outcome(0).Cached {
+		t.Fatal("a test seen running is not a cached test")
+	}
+}
+
+func TestTrackerJoinedRunNeedsBothNodes(t *testing.T) {
+	for _, nodes := range [][]api.NodeSnap{
+		{{Node: "testrun_00", Gen: 100, Phase: "done"}},
+		{{Node: "testvalue_00", Gen: 200, Phase: "done"}},
+		{{Node: "testrun_00", Phase: "done"}, {Node: "testvalue_00", Gen: 200, Phase: "done"}}, // no generation
+		{{Node: "buildrun_00", Gen: 100, Phase: "done"}, {Node: "testvalue_00", Gen: 200, Phase: "done"}},
+	} {
+		tr := NewTracker(twoTests, newClock().now)
+		tr.Handle(state(0, spec.StateBuilding, ""))
+		tr.Handle(snapshot(0, "r", nodes...))
+		tr.Handle(state(0, spec.StateDone, ""))
+		if tr.Outcome(0).Cached {
+			t.Errorf("nodes %+v: Cached", nodes)
+		}
+	}
+}
+
 func TestTrackerCachedOnlyWhenDone(t *testing.T) {
 	tr := NewTracker(twoTests, newClock().now)
 	tr.Handle(state(0, spec.StateBuilding, ""))
