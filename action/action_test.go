@@ -28,6 +28,8 @@ const guard = 10 * time.Second
 // script is what the fake backend does for one test directory.
 type script struct {
 	logs   []string
+	node   string         // the node the logs come from; "testrun_ab" when empty
+	recap  []string       // notes of the build itself, sent after the logs
 	nodes  []api.NodeSnap // sent as one snapshot before the terminal state
 	state  spec.BuildState
 	err    error
@@ -87,8 +89,15 @@ func (b *backend) cancelChan(path string) chan struct{} {
 func (b *backend) Follow(ctx context.Context, h jobs.Handle, sink jobs.Sink) (spec.BuildState, error) {
 	sc := b.scripts[h.RequestID]
 	sink.State("running", "0/1 built")
+	node := sc.node
+	if node == "" {
+		node = "testrun_ab"
+	}
 	for _, l := range sc.logs {
-		sink.Log("testrun_ab", l)
+		sink.Log(node, l)
+	}
+	for _, l := range sc.recap {
+		sink.Log("", l)
 	}
 	sink.Snapshot(api.Snapshot{RequestID: "req" + h.RequestID, Nodes: sc.nodes})
 	switch {
@@ -365,6 +374,69 @@ func TestRunPassCachedFail(t *testing.T) {
 	}
 	if !strings.Contains(out, "[svc] testrun_ab │ --- FAIL: TestQueue") {
 		t.Errorf("stdout lacks the test's output:\n%s", out)
+	}
+}
+
+// A later run of a test joins the finished testrun node of an earlier
+// request. The server does not flag that node cached, and neither does
+// builds.Run; the node's age says the test did not run for this request.
+func TestRunJoinedRunIsCached(t *testing.T) {
+	h := newHarness(t, []string{"/lib"}, map[string]script{
+		"/lib": {nodes: []api.NodeSnap{
+			{Node: "testrun_00", Gen: 100, Phase: "done"},
+			{Node: "testvalue_00", Gen: 200, Phase: "done"},
+		}},
+	})
+	if code := h.run(context.Background()); code != 0 {
+		t.Fatalf("exit = %d\nstderr: %s", code, h.err.String())
+	}
+	hit := one(t, h.gh.byName(), "jobs / lib (linux/amd64)")
+	if hit.Output.Title != "already passed (cached)" {
+		t.Errorf("check = %+v", hit)
+	}
+	if out := h.out.String(); !strings.Contains(out, "1 passed (1 already passed), 0 failed") {
+		t.Errorf("stdout:\n%s", out)
+	}
+	if got, want := readFile(t, h.outputFile), "passed=1\ncached=1\nfailed=0\ncancelled=0\n"; got != want {
+		t.Errorf("outputs = %q, want %q", got, want)
+	}
+}
+
+// What a failed test printed reads in the step log as it was printed: one
+// line per line, short node names, no generation number, and no claim that
+// output was streamed when none was.
+func TestRunFailureReadsAsPrinted(t *testing.T) {
+	const node = "testrun_2102bca64fec3eb895e30af8c19912e9dafbc85854f53d0e383fa46b9223c52b"
+	h := newHarness(t, []string{"/quiet", "/loud"}, map[string]script{
+		"/quiet": {
+			recap: []string{"--- testrun:2102bca6 failed (gen 1794916166247642826): testing: exec\n+ echo x\nexpected 2, got 3\n", "(output streamed above)"},
+			state: spec.StateFailed,
+		},
+		"/loud": {
+			logs:  []string{"+ exit 1"},
+			node:  node,
+			recap: []string{"--- testrun:2102bca6 failed (gen 7): testing: exec", "(output streamed above)"},
+			state: spec.StateFailed,
+		},
+	})
+	if code := h.run(context.Background()); code != 1 {
+		t.Fatalf("exit = %d, want 1", code)
+	}
+	out := h.out.String()
+	for _, want := range []string{
+		"[quiet] --- testrun:2102bca6 failed: testing: exec\n[quiet] + echo x\n[quiet] expected 2, got 3\n[quiet] ▸ failed",
+		"[loud] testrun:2102bca6 │ + exit 1\n[loud] --- testrun:2102bca6 failed: testing: exec\n[loud] (output streamed above)\n",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("stdout lacks %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "(gen ") || strings.Contains(out, node) || strings.Contains(out, "[quiet] (output streamed above)") {
+		t.Errorf("stdout:\n%s", out)
+	}
+	quiet := one(t, h.gh.byName(), "jobs / quiet (linux/amd64)")
+	if text := quiet.Output.Text; !strings.Contains(text, "expected 2, got 3") || strings.Contains(text, "streamed above") || strings.Contains(text, "(gen ") {
+		t.Errorf("check text:\n%s", text)
 	}
 }
 

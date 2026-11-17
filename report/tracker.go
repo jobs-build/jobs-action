@@ -21,6 +21,7 @@ type tracked struct {
 	started  time.Time // first building state
 	building bool
 	snap     *api.Snapshot // latest snapshot
+	sawRun   bool          // a testrun node was seen before it was done
 	tail     []string
 }
 
@@ -53,6 +54,11 @@ func (t *Tracker) Handle(ev spec.Event) (i int, terminal bool) {
 	case spec.KindSnapshot:
 		if ev.Snap != nil {
 			x.snap = ev.Snap
+			for _, n := range ev.Snap.Nodes {
+				if n.Phase != wire.PhaseDone && strings.HasPrefix(n.Node, wire.KindTestRun+"_") {
+					x.sawRun = true
+				}
+			}
 			if ev.Snap.RequestID != "" {
 				x.outcome.RequestID = ev.Snap.RequestID
 			}
@@ -70,7 +76,7 @@ func (t *Tracker) Handle(ev spec.Event) (i int, terminal bool) {
 			x.outcome.Duration = t.now().Sub(x.started)
 		}
 		if ev.State == spec.StateDone {
-			x.outcome.Cached = cachedTest(x.snap)
+			x.outcome.Cached = cachedTest(x.snap) || (!x.sawRun && joinedRun(x.snap))
 		}
 		return ev.Build, true
 	}
@@ -94,8 +100,8 @@ func (t *Tracker) Outcome(i int) Outcome {
 // fast-paths at a cached testvalue node, and a change the test does not cover
 // yields a cached testrun node. Cached imports and builds do not count.
 //
-// builds.Result.Cached stays the authority; this copy exists so that a check
-// can be completed when its test ends rather than when the whole run does.
+// This copy exists so that a check can be completed when its test ends rather
+// than when the whole run does.
 func cachedTest(snap *api.Snapshot) bool {
 	if snap == nil {
 		return false
@@ -106,4 +112,39 @@ func cachedTest(snap *api.Snapshot) bool {
 		}
 	}
 	return false
+}
+
+// joinedRun reports whether snap shows a test whose run the request joined
+// rather than started. The server flags a node cached only when the node is
+// new and its output is already recorded. A finished request keeps its nodes
+// on the server until it is deleted or the server restarts, so a later
+// request for the same test joins the finished testrun node, which carries no
+// flag: for that node, the test did run.
+//
+// A node's generation starts at the server's clock when the node is created,
+// and a request creates its testvalue node before the testrun node. A testrun
+// node older than the request's testvalue node was therefore not created for
+// this request. This leans on how the server numbers generations; were that
+// to change, such a test would read "passed" again, as it did before.
+func joinedRun(snap *api.Snapshot) bool {
+	if snap == nil {
+		return false
+	}
+	var value uint64 // the newest testvalue node
+	for _, n := range snap.Nodes {
+		if strings.HasPrefix(n.Node, wire.KindTestValue+"_") {
+			value = max(value, n.Gen)
+		}
+	}
+	joined := false
+	for _, n := range snap.Nodes {
+		if !strings.HasPrefix(n.Node, wire.KindTestRun+"_") {
+			continue
+		}
+		if n.Gen == 0 || n.Gen >= value {
+			return false
+		}
+		joined = true
+	}
+	return joined
 }

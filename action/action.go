@@ -157,7 +157,11 @@ func Run(ctx context.Context, cfg Config, d Deps) int {
 		return fatal("connect to the jobs server: %v", err)
 	}
 
-	plain := report.NewPlain(out, tests)
+	now := d.Now
+	if now == nil {
+		now = time.Now
+	}
+	plain := report.NewPlain(out, tests, now)
 	plain.Note(fmt.Sprintf("%d tests on %s", len(tests), cfg.Platform))
 	chk := openChecks(ctx, cfg.Env, d.API, tests, warn)
 
@@ -173,13 +177,14 @@ func Run(ctx context.Context, cfg Config, d Deps) int {
 		close(events)
 	}()
 
-	now := d.Now
-	if now == nil {
-		now = time.Now
-	}
 	tracker := report.NewTracker(tests, now)
+	tidy := report.NewTidy(len(tests))
 	handle := func(ev spec.Event) {
 		ev.Line, ev.Info = scrub(ev.Line), scrub(ev.Info)
+		ev, ok := tidy.Event(ev)
+		if !ok {
+			return
+		}
 		plain.Handle(ev)
 		if i, terminal := tracker.Handle(ev); terminal {
 			chk.Complete(i, tracker.Outcome(i))
@@ -237,15 +242,16 @@ loop:
 		}()
 		plain.Note("the server did not confirm the cancellation in time")
 	} else {
-		// builds.Result is the authority on the cached flag, and settles any
-		// test whose terminal event the tracker did not see.
+		// builds.Result settles any test whose terminal event the tracker did
+		// not see. Its cached flag is the server's; the tracker also knows a
+		// test whose finished run the request joined.
 		for i, r := range <-done {
 			o := &outcomes[i]
 			if o.State == "" && r.State.Terminal() {
 				o.State, o.Err = r.State, scrub(r.Err)
 			}
 			if o.State == spec.StateDone {
-				o.Cached = r.Cached
+				o.Cached = o.Cached || r.Cached
 			}
 		}
 	}

@@ -351,10 +351,22 @@ of concurrent requests.
 **Cached.** The check is completed when the terminal state event arrives,
 not when the whole run ends, so a long run does not hold back finished
 rows. The cached flag at that moment comes from the test's last snapshot,
-using the same rule as assimilate's `cachedTest`. The job summary and the
-outputs use `builds.Result.Cached`, which is authoritative. Exporting the
-rule from assimilate so it is not duplicated is a follow-up for
-assimilate, not a blocker.
+using the same rule as assimilate's `cachedTest`. Exporting the rule from
+assimilate so it is not duplicated is a follow-up for assimilate, not a
+blocker.
+
+*Since v0.1.1.* That rule alone misses most memo hits on a long-lived
+server. The server flags a node cached only when the node is new and its
+output is already recorded, and a finished request keeps its nodes until it
+is deleted or the server restarts. A later request for the same test joins
+the finished testrun node, which carries no flag. The tracker therefore
+also counts a test as already passed when its testrun node is older than
+the request's own testvalue node (a node's generation starts at the
+server's clock at creation, and a request creates the testvalue node first)
+and was never seen in a phase other than done. The job summary and the
+outputs take the flag from the tracker or from `builds.Result.Cached`,
+whichever says cached. The proper fix is a per-request flag from the
+server; with it this rule becomes redundant, not wrong.
 
 **Captured output.** The reporter keeps a bounded tail of log lines per
 test (`KindLog` events, with the node name as a prefix where a test's
@@ -442,6 +454,13 @@ Failure details are budgeted so the whole summary stays well under the
 Standard output carries the same plain prefixed lines `assimilate test
 --plain` prints (state changes, progress notes, test output), one prefix
 per test, so the raw step log is readable on its own.
+
+*Since v0.1.1* the events pass through a tidying step before they reach the
+log and the checks: node names are shortened to `kind:first-8-hex-digits`,
+the failure recap loses its generation number, and its "(output streamed
+above)" is dropped when no output of that node arrived. The log prints text
+of several lines as several prefixed lines, and reports a push in progress
+every 10 seconds and at its end instead of once per object.
 
 ### Releases
 
