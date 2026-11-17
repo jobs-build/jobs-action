@@ -73,16 +73,51 @@ The step fails when any test did not pass. It succeeds when none was found.
 ## What runs
 
 Every directory in the checkout that holds a file named `TESTS.jobs` is one
-test, run on the input platform with no params. The whole checkout is the
-test's context and the directory is where it runs, so references to sibling
-directories resolve. This is what `jobs-client remote-test` does from that
-directory with the repository root as context, and what `assimilate test` does
-for a project-tree test.
+test, run on the input platform with no params, unless the directory lists
+[param sets](#param-sets). The whole checkout is the test's context and the
+directory is where it runs, so references to sibling directories resolve. This
+is what `jobs-client remote-test` does from that directory with the repository
+root as context, and what `assimilate test` does for a project-tree test.
 
 Discovery walks the tree jobs-iroh would ingest: `.amberignore` applies and
 `.git` is never seen. A `TESTS.jobs` under an ignored directory is not a test.
 
 `assimilate-templates/` and `assimilate-tests.yaml` are not read.
+
+### Param sets
+
+A file named `TESTS.params.yaml` beside a `TESTS.jobs` makes that test run
+once for each set it lists, with the set's params, side by side. Each set is
+a test of its own: its own check, its own row in the summary, its own record
+of having passed. The test is then not run without params.
+
+```yaml
+# services/api/TESTS.params.yaml
+sets:
+  unit:  {pkgs: ./...}
+  e2e-0: {pkgs: ./e2e, shard: 0, shards: 2}
+  e2e-1: {pkgs: ./e2e, shard: 1, shards: 2}
+```
+
+```
+✓ jobs / services/api [unit] (linux/amd64)    passed in 41s
+✓ jobs / services/api [e2e-0] (linux/amd64)   passed in 2m3s
+✗ jobs / services/api [e2e-1] (linux/amd64)   failed after 1m12s
+```
+
+The recipe reads a set's params as `params`, as it reads the `--param`s of
+`jobs-client`. This is the way to share one recipe between several runs: a
+recipe cannot load another, and reads no file above its own directory.
+
+- A set's name is 1 to 64 letters, digits, dots, dashes and underscores, and
+  starts with a letter or a digit. `{}` is a set without params.
+- A param's value is the text as written: `0` and `yes` reach the recipe as
+  the strings `"0"` and `"yes"`. Lists and mappings are not values.
+- The sets run and are reported in the file's order.
+- `sets` is the file's only key. A file that cannot be read as above, or
+  that lists no set, fails the step before anything runs: running the test
+  without params in its place would be another test.
+- The file is read from the checkout whether or not `.amberignore` names it.
 
 ## What does not run again
 
@@ -104,8 +139,9 @@ Two things to know:
   passed.
 - In an assimilate monorepo, `assimilate test` runs a `TESTS.jobs` that sits
   in a deployed image's directory with that image's sources and args. The
-  action runs it with the whole tree and no params. With args those are two
-  different tests and do not share a record.
+  action runs it with the whole tree, and with no params or those of a
+  [set](#param-sets). A set with the image's args shares the image's record;
+  without such a set those are two different tests.
 
 ## Pull requests
 
@@ -151,16 +187,16 @@ No GitHub API failure ever changes the step's result.
 
 ## Limits
 
-- **Scale.** Built for up to about 100 tests per run. Each test costs two API
-  writes, against a budget of 1,000 requests an hour per repository. Above
-  that the action still runs every test, but check reporting may hit the rate
-  limit and fall back to the job summary.
+- **Scale.** Built for up to about 100 tests per run, a param set counting as
+  a test. Each test costs two API writes, against a budget of 1,000 requests
+  an hour per repository. Above that the action still runs every test, but
+  check reporting may hit the rate limit and fall back to the job summary.
 - **Runners.** Linux x64 and arm64. The runner's architecture has nothing to
   do with `platform`: tests run on the jobs-iroh server's runners.
 - **Cancellation.** When a workflow is cancelled, the action cancels its
   requests on the server and marks its open checks cancelled. GitHub allows
   about ten seconds for this.
-- **One platform per step**, no test params, no checks on fork pull requests.
+- **One platform per step**, no checks on fork pull requests.
 
 ## How the binary gets there
 

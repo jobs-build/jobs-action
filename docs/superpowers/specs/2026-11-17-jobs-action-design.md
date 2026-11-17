@@ -508,3 +508,26 @@ binary.
   release is followed by a manual run in a real repository with a
   `TESTS.jobs` and a `JOBS_SERVER` secret, covering a pass, a rerun that
   is cached, a failure, and a cancelled workflow.
+
+## Amendment, 2026-11-17: param sets (v0.2.0)
+
+The non-goal "Test params" is withdrawn, on Dragan's decision. A repository
+whose tests are one recipe run several times with different params could
+not use the action: a recipe cannot load another and reads no file above
+its own directory, so the runs cannot be turned into directories either.
+lennier is such a repository (one root `TESTS.jobs`, 21 runs).
+
+- A `TESTS.params.yaml` beside a `TESTS.jobs` lists named sets of params
+  under the key `sets`. The test is submitted once for each set, as
+  `spec.WholeTreeTest(dir, platform)` with the set's params as `Args`, and
+  not without params. A set without params is submitted with no `Args`.
+- Each set is a test in every respect: a check named
+  `jobs / <path> [<set>] (<platform>)`, a summary row, a log prefix, a
+  count in the outputs. The sets keep the file's order.
+- The file is read from the checkout, not from the ingested tree. Values
+  are taken as the text written, since params are strings. A file that
+  cannot be read, or that lists no set, ends the step before the dial:
+  the anti-goal "silently skipping a test" covers a set list as well.
+- `assimilate-templates/` and `assimilate-tests.yaml` stay unread. For a
+  root test, a set with an image's args builds the spec `assimilate test`
+  builds for that image, so the two share a record.
